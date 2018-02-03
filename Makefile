@@ -1,8 +1,15 @@
-CLOSURE=closure-compiler/compiler.jar
+CLOSURE_DIR=closure-compiler
+CLOSURE=$(CLOSURE_DIR)/compiler.jar
 BROWSER=chromium
+NASM_TEST_DIR=./tests/nasm
 
 all: build/v86_all.js
 browser: build/v86_all.js
+
+ACPI=false
+ifeq ($(useacpi),true)
+ACPI=true
+endif
 
 # Used for nodejs builds and in order to profile code.
 # `debug` gives identifiers a readable name, make sure it doesn't have any side effects.
@@ -10,15 +17,25 @@ CLOSURE_READABLE=--formatting PRETTY_PRINT --debug
 
 CLOSURE_SOURCE_MAP=\
 		--source_map_format V3\
+		--source_map_include_content\
 		--create_source_map '%outname%.map'
 
 		#--jscomp_error reportUnknownTypes\
+		#--jscomp_error unusedLocalVariables\
+		#--jscomp_error unusedPrivateMembers\
+		#--new_type_inf\
+
+		# Easily breaks code:
+		#--assume_function_wrapper\
+
+		# implies new type inferrence
+		#--jscomp_error newCheckTypes\
 
 CLOSURE_FLAGS=\
-		--compilation_level ADVANCED_OPTIMIZATIONS\
+	        --js lib/closure-base.js\
+		--generate_exports\
 		--externs src/externs.js\
 		--warning_level VERBOSE\
-		--jscomp_off uselessCode\
 		--jscomp_error accessControls\
 		--jscomp_error ambiguousFunctionDecl\
 		--jscomp_error checkEventfulObjectDisposal\
@@ -36,7 +53,6 @@ CLOSURE_FLAGS=\
 		--jscomp_error externsValidation\
 		--jscomp_error fileoverviewTags\
 		--jscomp_error globalThis\
-		--jscomp_error inferredConstCheck\
 		--jscomp_error internetExplorerChecks\
 		--jscomp_error invalidCasts\
 		--jscomp_error misplacedTypeAnnotation\
@@ -44,7 +60,6 @@ CLOSURE_FLAGS=\
 		--jscomp_error missingProperties\
 		--jscomp_error missingReturn\
 		--jscomp_error msgDescriptions\
-		--jscomp_error newCheckTypes\
 		--jscomp_error nonStandardJsDocs\
 		--jscomp_error suspiciousCode\
 		--jscomp_error strictModuleDepCheck\
@@ -52,28 +67,29 @@ CLOSURE_FLAGS=\
 		--jscomp_error undefinedNames\
 		--jscomp_error undefinedVars\
 		--jscomp_error unknownDefines\
-		--jscomp_error unnecessaryCasts\
 		--jscomp_error visibility\
 		--use_types_for_optimization\
 		--summary_detail_level 3\
 		--language_in ECMASCRIPT5_STRICT
-
-		#--new_type_inf\
-
 
 TRANSPILE_ES6_FLAGS=\
 		--language_in ECMASCRIPT6_STRICT\
 		--language_out ECMASCRIPT5_STRICT\
 
 
-CORE_FILES=src/const.js src/io.js src/main.js src/lib.js src/fpu.js src/ide.js src/pci.js src/floppy.js src/memory.js\
-	   src/dma.js src/pit.js src/vga.js src/ps2.js src/pic.js src/rtc.js src/uart.js src/hpet.js src/acpi.js src/apic.js\
-	   src/state.js src/ne2k.js src/virtio.js src/bus.js src/log.js\
-	   src/cpu.js src/translate.js src/modrm.js src/string.js src/arith.js src/misc_instr.js src/instructions.js src/debug.js
-LIB_FILES=lib/9p.js lib/filesystem.js lib/jor1k.js lib/marshall.js lib/utf8.js
-BROWSER_FILES=src/browser/screen.js\
-	      src/browser/keyboard.js src/browser/mouse.js src/browser/serial.js\
-	      src/browser/network.js src/browser/lib.js src/browser/starter.js src/browser/worker_bus.js
+CORE_FILES=const.js config.js io.js main.js lib.js fpu.js ide.js pci.js floppy.js memory.js \
+	   dma.js pit.js vga.js ps2.js pic.js rtc.js uart.js hpet.js acpi.js apic.js ioapic.js \
+	   state.js ne2k.js sb16.js virtio.js bus.js log.js \
+	   cpu.js translate.js modrm.js string.js arith.js misc_instr.js instructions.js debug.js \
+	   elf.js
+LIB_FILES=9p.js filesystem.js jor1k.js marshall.js utf8.js
+BROWSER_FILES=screen.js \
+	      keyboard.js mouse.js speaker.js serial.js \
+	      network.js lib.js starter.js worker_bus.js dummy_screen.js
+
+CORE_FILES:=$(addprefix src/,$(CORE_FILES))
+LIB_FILES:=$(addprefix lib/,$(LIB_FILES))
+BROWSER_FILES:=$(addprefix src/browser/,$(BROWSER_FILES))
 
 build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 	mkdir -p build
@@ -81,8 +97,10 @@ build/v86_all.js: $(CLOSURE) src/*.js src/browser/*.js lib/*.js
 	java -jar $(CLOSURE) \
 		--js_output_file build/v86_all.js\
 		--define=DEBUG=false\
+		--define=ENABLE_ACPI=$(ACPI)\
 		$(CLOSURE_SOURCE_MAP)\
 		$(CLOSURE_FLAGS)\
+		--compilation_level ADVANCED\
 		$(TRANSPILE_ES6_FLAGS)\
 		--js $(CORE_FILES)\
 		--js $(LIB_FILES)\
@@ -100,9 +118,11 @@ build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 	java -jar $(CLOSURE) \
 		--js_output_file build/libv86.js\
 		--define=DEBUG=false\
+		--define=ENABLE_ACPI=$(ACPI)\
 		$(CLOSURE_FLAGS)\
+		--compilation_level SIMPLE\
 		$(TRANSPILE_ES6_FLAGS)\
-		--output_wrapper ';(function(){%output%})();'\
+		--output_wrapper ';(function(){%output%}).call(this);'\
 		--js $(CORE_FILES)\
 		--js $(BROWSER_FILES)\
 		--js $(LIB_FILES)
@@ -110,8 +130,11 @@ build/libv86.js: $(CLOSURE) src/*.js lib/*.js src/browser/*.js
 	ls -lh build/libv86.js
 
 clean:
-	rm build/libv86.js
-	rm build/v86_all.js
+	-rm build/libv86.js
+	-rm build/v86_all.js
+	-rm build/libv86.js.map
+	-rm build/v86_all.js.map
+	$(MAKE) -C $(NASM_TEST_DIR) clean
 
 run:
 	python2 -m SimpleHTTPServer 2> /dev/null
@@ -129,8 +152,25 @@ update_version:
 
 
 $(CLOSURE):
-	wget -P closure-compiler http://dl.google.com/closure-compiler/compiler-latest.zip
-	unzip -d closure-compiler closure-compiler/compiler-latest.zip compiler.jar
+	wget -P $(CLOSURE_DIR) http://dl.google.com/closure-compiler/compiler-latest.zip
+	unzip -d closure-compiler $(CLOSURE_DIR)/compiler-latest.zip \*.jar
+	mv $(CLOSURE_DIR)/*.jar $(CLOSURE)
+	rm $(CLOSURE_DIR)/compiler-latest.zip
 
-test: build/libv86.js
+tests: build/libv86.js
 	./tests/full/run.js
+
+nasmtests: build/libv86.js
+	$(MAKE) -C $(NASM_TEST_DIR) all
+	$(NASM_TEST_DIR)/run.js
+
+qemutests: build/libv86.js
+	make -C tests/qemu test-i386
+	./tests/qemu/run.js > result
+	./tests/qemu/test-i386 > reference
+	diff result reference
+
+kvm-unit-test: build/libv86.js
+	(cd tests/kvm-unit-tests && ./configure)
+	make -C tests/kvm-unit-tests
+	tests/kvm-unit-tests/run.js tests/kvm-unit-tests/x86/realmode.flat

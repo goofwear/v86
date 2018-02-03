@@ -62,6 +62,9 @@ function Ne2k(cpu, bus)
     /** @const @type {CPU} */
     this.cpu = cpu;
 
+    /** @const @type {PCI} */
+    this.pci = cpu.devices.pci;
+
     /** @const @type {BusConnector} */
     this.bus = bus;
     this.bus.register("net0-receive", function(data)
@@ -82,7 +85,7 @@ function Ne2k(cpu, bus)
             0xec, 0x10, 0x29, 0x80, 0x03, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00,
             this.port & 0xFF | 1, this.port >> 8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x00, 0x11,
-            0x00, 0x00, 0xb8, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0b, 0x01, 0x00, 0x00,
+            0x00, 0x00, 0xb8, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
         ];
         this.pci_id = 0x05 << 3;
         this.pci_bars = [
@@ -90,7 +93,6 @@ function Ne2k(cpu, bus)
                 size: 32,
             },
         ];
-        cpu.devices.pci.register_device(this);
     }
 
     this.isr = 0;
@@ -99,8 +101,6 @@ function Ne2k(cpu, bus)
     this.cr = 1;
 
     this.dcfg = 0;
-
-    this.irq = 0x0B;
 
     this.rcnt = 0;
 
@@ -124,6 +124,8 @@ function Ne2k(cpu, bus)
     {
         this.memory[i << 1] = this.memory[i << 1 | 1] = mac[i];
     }
+
+    this.memory[14] = this.memory[15] = 0x57;
 
     dbg_log("Mac: " + h(mac[0], 2) + ":" +
                       h(mac[1], 2) + ":" +
@@ -273,6 +275,7 @@ function Ne2k(cpu, bus)
             // acknoledge interrupts where bit is set
             dbg_log("Write isr: " + h(data_byte, 2), LOG_NET);
             this.isr &= ~data_byte
+            this.update_irq();
         }
         else
         {
@@ -486,13 +489,18 @@ function Ne2k(cpu, bus)
     });
 
     io.register_read(this.port | NE_DATAPORT | 0, this,
-            this.data_port_read16,
+            this.data_port_read8,
             this.data_port_read16,
             this.data_port_read32);
     io.register_write(this.port | NE_DATAPORT | 0, this,
             this.data_port_write16,
             this.data_port_write16,
             this.data_port_write32);
+
+    if(use_pci)
+    {
+        cpu.devices.pci.register_device(this);
+    }
 }
 
 Ne2k.prototype.get_state = function()
@@ -540,7 +548,11 @@ Ne2k.prototype.update_irq = function()
 {
     if(this.imr & this.isr)
     {
-        this.cpu.device_raise_irq(this.irq);
+        this.pci.raise_irq(this.pci_id);
+    }
+    else
+    {
+        this.pci.lower_irq(this.pci_id);
     }
 };
 
@@ -549,6 +561,12 @@ Ne2k.prototype.data_port_write = function(data_byte)
     dbg_log("Write data port: data=" + h(data_byte & 0xFF, 2) +
                             " rsar=" + h(this.rsar, 4) +
                             " rcnt=" + h(this.rcnt, 4), LOG_NET);
+
+    if(this.rsar > 0x10 && this.rsar < (START_PAGE << 8))
+    {
+        // unmapped
+        return;
+    }
 
     this.rcnt--;
     this.memory[this.rsar++] = data_byte;
@@ -602,6 +620,11 @@ Ne2k.prototype.data_port_read = function()
     }
 
     return data;
+};
+
+Ne2k.prototype.data_port_read8 = function()
+{
+    return this.data_port_read16() & 0xFF;
 };
 
 Ne2k.prototype.data_port_read16 = function()

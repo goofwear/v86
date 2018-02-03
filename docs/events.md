@@ -1,8 +1,8 @@
 Here is a list of events that can be listened to using
-[`add_listener`](docs/api.md#add_listenerstring-event-function-listener). These
-can be used to programtically control the emulator. Events cannot be sent to
+[`add_listener`](api.md#add_listenerstring-event-function-listener). These
+can be used to programmatically control the emulator. Events cannot be sent to
 the emulator (although it is internally implemented that way), use the
-[API](docs/api.md) methods for that.
+[API](api.md) methods for that.
 
 ### Serial terminal
 
@@ -25,7 +25,7 @@ See also: [screen.js](src/browser/screen.js).
 - `screen-put-pixel-linear` - `[number addr, number value]`
 - `screen-put-pixel-linear32` - `[number addr, number value]`
 - `screen-set-size-text` - `[number cols_count, number rows_count]`
-- `screen-set-size-graphical` - `[number width, number height]`
+- `screen-set-size-graphical` - `[number width, number height, number virtual_width, number virtual_height, number bpp]`
 - `screen-update-cursor` - `[number row, number col]`
 - `screen-update-cursor-scanline` - `[number cursor_scanline_start, number cursor_scanline_end]`
 

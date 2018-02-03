@@ -7,3 +7,11 @@ tests/qemu/test-i386
 build/
 closure-compiler/
 images/
+*.bak
+*.orig
+*.o
+*.bin
+*.img
+*.fixture
+*.fuse_hidden*
+*.DS_Store

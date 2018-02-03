@@ -11,19 +11,21 @@
  * lea
  * enter
  * bswap
+ * fxsave, fxrstor
  */
 "use strict";
 
 CPU.prototype.jmpcc8 = function(condition)
 {
+    var imm8 = this.read_op8s();
     if(condition)
     {
-        var imm8 = this.read_imm8s();
         this.instruction_pointer = this.instruction_pointer + imm8 | 0;
+        this.branch_taken();
     }
     else
     {
-        this.instruction_pointer = this.instruction_pointer + 1 | 0;
+        this.branch_not_taken();
     }
 };
 
@@ -40,30 +42,33 @@ CPU.prototype.jmp_rel16 = function(rel16)
 
 CPU.prototype.jmpcc16 = function(condition)
 {
+    var imm16 = this.read_op16();
     if(condition)
     {
-        this.jmp_rel16(this.read_imm16());
+        this.jmp_rel16(imm16);
+        this.branch_taken();
     }
     else
     {
-        this.instruction_pointer = this.instruction_pointer + 2 | 0;
+        this.branch_not_taken();
     }
 }
 
 
 CPU.prototype.jmpcc32 = function(condition)
 {
+    var imm32s = this.read_op32s();
     if(condition)
     {
-        // don't change to `this.instruction_pointer += this.read_imm32s()`,
-        //   since read_imm32s modifies instruction_pointer
+        // don't change to `this.instruction_pointer += this.read_op32s()`,
+        //   since read_op32s modifies instruction_pointer
 
-        var imm32s = this.read_imm32s();
         this.instruction_pointer = this.instruction_pointer + imm32s | 0;
+        this.branch_taken();
     }
     else
     {
-        this.instruction_pointer = this.instruction_pointer + 4 | 0;
+        this.branch_not_taken();
     }
 };
 
@@ -87,42 +92,58 @@ CPU.prototype.cmovcc32 = function(condition)
 
 CPU.prototype.setcc = function(condition)
 {
-    this.set_e8(this.modrm_resolve(this.modrm_byte), condition ? 1 : 0)
+    this.set_e8(condition ? 1 : 0)
 };
 
 CPU.prototype.loopne = function(imm8s)
 {
-    if(--this.regv[this.reg_vcx] && !this.getzf())
+    if(this.decr_ecx_asize() && !this.getzf())
     {
         this.instruction_pointer = this.instruction_pointer + imm8s | 0;
-        if(!this.operand_size_32) dbg_assert(this.get_real_eip() <= 0xffff);
+        this.branch_taken();
+    }
+    else
+    {
+        this.branch_not_taken();
     }
 }
 
 CPU.prototype.loope = function(imm8s)
 {
-    if(--this.regv[this.reg_vcx] && this.getzf())
+    if(this.decr_ecx_asize() && this.getzf())
     {
         this.instruction_pointer = this.instruction_pointer + imm8s | 0;
-        if(!this.operand_size_32) dbg_assert(this.get_real_eip() <= 0xffff);
+        this.branch_taken();
+    }
+    else
+    {
+        this.branch_not_taken();
     }
 }
 
 CPU.prototype.loop = function(imm8s)
 {
-    if(--this.regv[this.reg_vcx])
+    if(this.decr_ecx_asize())
     {
         this.instruction_pointer = this.instruction_pointer + imm8s | 0;
-        if(!this.operand_size_32) dbg_assert(this.get_real_eip() <= 0xffff);
+        this.branch_taken();
+    }
+    else
+    {
+        this.branch_not_taken();
     }
 }
 
 CPU.prototype.jcxz = function(imm8s)
 {
-    if(this.regv[this.reg_vcx] === 0)
+    if(this.get_reg_asize(reg_ecx) === 0)
     {
         this.instruction_pointer = this.instruction_pointer + imm8s | 0;
-        if(!this.operand_size_32) dbg_assert(this.get_real_eip() <= 0xffff);
+        this.branch_taken();
+    }
+    else
+    {
+        this.branch_not_taken();
     }
 };
 
@@ -277,7 +298,7 @@ CPU.prototype.pusha16 = function()
 
     // make sure we don't get a pagefault after having
     // pushed several registers already
-    this.translate_address_write(this.get_stack_pointer(-15));
+    this.writable_or_pagefault(this.get_stack_pointer(-16), 16);
 
     this.push16(this.reg16[reg_ax]);
     this.push16(this.reg16[reg_cx]);
@@ -293,7 +314,7 @@ CPU.prototype.pusha32 = function()
 {
     var temp = this.reg32s[reg_esp];
 
-    this.translate_address_write(this.get_stack_pointer(-31));
+    this.writable_or_pagefault(this.get_stack_pointer(-32), 32);
 
     this.push32(this.reg32s[reg_eax]);
     this.push32(this.reg32s[reg_ecx]);
@@ -307,6 +328,7 @@ CPU.prototype.pusha32 = function()
 
 CPU.prototype.popa16 = function()
 {
+    this.translate_address_read(this.get_stack_pointer(0));
     this.translate_address_read(this.get_stack_pointer(15));
 
     this.reg16[reg_di] = this.pop16();
@@ -321,6 +343,7 @@ CPU.prototype.popa16 = function()
 
 CPU.prototype.popa32 = function()
 {
+    this.translate_address_read(this.get_stack_pointer(0));
     this.translate_address_read(this.get_stack_pointer(31));
 
     this.reg32s[reg_edi] = this.pop32s();
@@ -381,6 +404,7 @@ CPU.prototype.lss16 = function(seg)
 {
     if(this.modrm_byte >= 0xC0)
     {
+        // 0xc4c4 #ud (EMULATOR_BOP) is used by reactos and windows to exit vm86 mode
         this.trigger_ud();
     }
 
@@ -430,7 +454,7 @@ CPU.prototype.enter16 = function(size, nesting_level)
         this.push16(frame_temp);
     }
     this.reg16[reg_bp] = frame_temp;
-    this.reg16[reg_sp] -= size;
+    this.adjust_stack_reg(-size);
 };
 
 CPU.prototype.enter32 = function(size, nesting_level)
@@ -452,7 +476,7 @@ CPU.prototype.enter32 = function(size, nesting_level)
         this.push32(frame_temp);
     }
     this.reg32s[reg_ebp] = frame_temp;
-    this.reg32s[reg_esp] -= size;
+    this.adjust_stack_reg(-size);
 };
 
 CPU.prototype.bswap = function(reg)
@@ -462,3 +486,73 @@ CPU.prototype.bswap = function(reg)
     this.reg32s[reg] = temp >>> 24 | temp << 24 | (temp >> 8 & 0xFF00) | (temp << 8 & 0xFF0000);
 }
 
+CPU.prototype.fxsave = function(addr)
+{
+    this.writable_or_pagefault(addr, 512);
+
+    this.safe_write16(addr + 0 | 0, this.fpu.control_word);
+    this.safe_write16(addr + 2 | 0, this.fpu.load_status_word());
+    this.safe_write8( addr + 4 | 0, ~this.fpu.stack_empty & 0xFF);
+    this.safe_write16(addr + 6 | 0, this.fpu.fpu_opcode);
+    this.safe_write32(addr + 8 | 0, this.fpu.fpu_ip);
+    this.safe_write16(addr + 12 | 0, this.fpu.fpu_ip_selector);
+    this.safe_write32(addr + 16 | 0, this.fpu.fpu_dp);
+    this.safe_write16(addr + 20 | 0, this.fpu.fpu_dp_selector);
+
+    this.safe_write32(addr + 24 | 0, this.mxcsr);
+    this.safe_write32(addr + 28 | 0, MXCSR_MASK);
+
+    for(let i = 0; i < 8; i++)
+    {
+        this.fpu.store_m80(addr + 32 + (i << 4) | 0, this.fpu.st[this.fpu.stack_ptr + i & 7]);
+    }
+
+    // If the OSFXSR bit in control register CR4 is not set, the FXSAVE
+    // instruction may not save these registers. This behavior is
+    // implementation dependent.
+    for(let i = 0; i < 8; i++)
+    {
+        this.safe_write32(addr + 160 + (i << 4) +  0 | 0, this.reg_xmm32s[i << 2 | 0]);
+        this.safe_write32(addr + 160 + (i << 4) +  4 | 0, this.reg_xmm32s[i << 2 | 1]);
+        this.safe_write32(addr + 160 + (i << 4) +  8 | 0, this.reg_xmm32s[i << 2 | 2]);
+        this.safe_write32(addr + 160 + (i << 4) + 12 | 0, this.reg_xmm32s[i << 2 | 3]);
+    }
+};
+
+CPU.prototype.fxrstor = function(addr)
+{
+    this.translate_address_read(addr | 0);
+    this.translate_address_read(addr + 511 | 0);
+
+    var new_mxcsr = this.safe_read32s(addr + 24 | 0);
+
+    if(new_mxcsr & ~MXCSR_MASK)
+    {
+        dbg_log("Invalid mxcsr bits: " + h((new_mxcsr & ~MXCSR_MASK) >>> 0, 8));
+        this.trigger_gp(0);
+    }
+
+    this.fpu.control_word = this.safe_read16(addr + 0 | 0);
+    this.fpu.set_status_word(this.safe_read16(addr + 2 | 0));
+    this.fpu.stack_empty = ~this.safe_read8(addr + 4 | 0) & 0xFF;
+    this.fpu.fpu_opcode = this.safe_read16(addr + 6 | 0);
+    this.fpu.fpu_ip = this.safe_read32s(addr + 8 | 0);
+    this.fpu.fpu_ip = this.safe_read16(addr + 12 | 0);
+    this.fpu.fpu_dp = this.safe_read32s(addr + 16 | 0);
+    this.fpu.fpu_dp_selector = this.safe_read16(addr + 20 | 0);
+
+    this.mxcsr = new_mxcsr;
+
+    for(let i = 0; i < 8; i++)
+    {
+        this.fpu.st[this.fpu.stack_ptr + i & 7] = this.fpu.load_m80(addr + 32 + (i << 4) | 0);
+    }
+
+    for(let i = 0; i < 8; i++)
+    {
+        this.reg_xmm32s[i << 2 | 0] = this.safe_read32s(addr + 160 + (i << 4) +  0 | 0);
+        this.reg_xmm32s[i << 2 | 1] = this.safe_read32s(addr + 160 + (i << 4) +  4 | 0);
+        this.reg_xmm32s[i << 2 | 2] = this.safe_read32s(addr + 160 + (i << 4) +  8 | 0);
+        this.reg_xmm32s[i << 2 | 3] = this.safe_read32s(addr + 160 + (i << 4) + 12 | 0);
+    }
+};

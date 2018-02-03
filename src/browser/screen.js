@@ -22,7 +22,7 @@ function ScreenAdapter(screen_container, bus)
         graphic_screen = screen_container.getElementsByTagName("canvas")[0],
         graphic_context = graphic_screen.getContext("2d"),
 
-        text_screen = graphic_screen.nextElementSibling || graphic_screen.previousElementSibling,
+        text_screen = screen_container.getElementsByTagName("div")[0],
         cursor_element = document.createElement("div");
 
     var
@@ -128,7 +128,6 @@ function ScreenAdapter(screen_container, bus)
     }
 
     graphic_context["imageSmoothingEnabled"] = false;
-    graphic_context["mozImageSmoothingEnabled"] = false;
 
     cursor_element.style.position = "absolute";
     cursor_element.style.backgroundColor = "#ccc";
@@ -147,10 +146,7 @@ function ScreenAdapter(screen_container, bus)
 
     bus.register("screen-fill-buffer-end", function(data)
     {
-        var min = data[0];
-        var max = data[1];
-
-        this.update_buffer(min, max);
+        this.update_buffer(data);
     }, this);
 
     bus.register("screen-put-char", function(data)
@@ -168,13 +164,18 @@ function ScreenAdapter(screen_container, bus)
         this.update_cursor_scanline(data[0], data[1]);
     }, this);
 
+    bus.register("screen-clear", function()
+    {
+        this.clear_screen();
+    }, this);
+
     bus.register("screen-set-size-text", function(data)
     {
         this.set_size_text(data[0], data[1]);
     }, this);
     bus.register("screen-set-size-graphical", function(data)
     {
-        this.set_size_graphical(data[0], data[1]);
+        this.set_size_graphical(data[0], data[1], data[2], data[3]);
     }, this);
 
 
@@ -214,7 +215,7 @@ function ScreenAdapter(screen_container, bus)
         requestAnimationFrame(is_graphical ? update_graphical : update_text);
     };
 
-    function update_text()
+    var update_text = function()
     {
         for(var i = 0; i < text_mode_height; i++)
         {
@@ -226,16 +227,13 @@ function ScreenAdapter(screen_container, bus)
         }
 
         this.timer();
-    }
-    update_text = update_text.bind(this);
+    }.bind(this);
 
-    function update_graphical()
+    var update_graphical = function()
     {
         this.bus.send("screen-fill-buffer");
-
         this.timer();
-    }
-    update_graphical = update_graphical.bind(this);
+    }.bind(this);
 
     this.destroy = function()
     {
@@ -294,10 +292,21 @@ function ScreenAdapter(screen_container, bus)
         {
             this.text_update_row(i);
         }
+
+        update_scale_text();
     };
 
-    this.set_size_graphical = function(width, height)
+    this.set_size_graphical = function(width, height, buffer_width, buffer_height)
     {
+        if(DEBUG_SCREEN_LAYERS)
+        {
+            // Draw the entire buffer. Useful for debugging
+            // panning / page flipping / screen splitting code for both
+            // v86 developers and os developers
+            width = buffer_width;
+            height = buffer_height;
+        }
+
         graphic_screen.style.display = "block";
 
         graphic_screen.width = width;
@@ -309,7 +318,7 @@ function ScreenAdapter(screen_container, bus)
         // Make sure to call this here, because pixels are transparent otherwise
         //screen.clear_screen();
 
-        graphic_image_data = graphic_context.createImageData(width, height);
+        graphic_image_data = graphic_context.createImageData(buffer_width, buffer_height);
         graphic_buffer = new Uint8Array(graphic_image_data.data.buffer);
         graphic_buffer32 = new Int32Array(graphic_image_data.data.buffer);
 
@@ -317,6 +326,7 @@ function ScreenAdapter(screen_container, bus)
         graphical_mode_height = height;
 
         this.bus.send("screen-tell-buffer", [graphic_buffer32], [graphic_buffer32.buffer]);
+        update_scale_graphic();
     };
 
     this.set_scale = function(s_x, s_y)
@@ -324,19 +334,77 @@ function ScreenAdapter(screen_container, bus)
         scale_x = s_x;
         scale_y = s_y;
 
-        elem_set_scale(graphic_screen, scale_x, scale_y);
-        elem_set_scale(text_screen, scale_x, scale_y);
+        update_scale_text();
+        update_scale_graphic();
     };
     this.set_scale(scale_x, scale_y);
 
-    function elem_set_scale(elem, scale_x, scale_y)
+    function update_scale_text()
     {
-        var scale_str = "";
+        elem_set_scale(text_screen, scale_x, scale_y, true);
+    }
 
-        scale_str += scale_x === 1 ? "" : " scaleX(" + scale_x + ")";
-        scale_str += scale_y === 1 ? "" : " scaleY(" + scale_y + ")";
+    function update_scale_graphic()
+    {
+        elem_set_scale(graphic_screen, scale_x, scale_y, false);
+    }
 
-        elem.style.webkitTransform = elem.style.MozTransform = scale_str;
+    function elem_set_scale(elem, scale_x, scale_y, use_scale)
+    {
+        elem.style.width = "";
+        elem.style.height = "";
+
+        if(use_scale)
+        {
+            elem.style.transform = elem.style.webkitTransform = elem.style.MozTransform = "";
+        }
+
+        var rectangle = elem.getBoundingClientRect();
+
+        if(use_scale)
+        {
+            var scale_str = "";
+
+            scale_str += scale_x === 1 ? "" : " scaleX(" + scale_x + ")";
+            scale_str += scale_y === 1 ? "" : " scaleY(" + scale_y + ")";
+
+            elem.style.transform = elem.style.webkitTransform = elem.style.MozTransform = scale_str;
+        }
+        else
+        {
+            // unblur non-fractional scales
+            if(scale_x % 1 === 0 && scale_y % 1 === 0)
+            {
+                graphic_screen.style.imageRendering = "-moz-crisp-edges";
+                graphic_screen.style.imageRendering = "moz-crisp-edges";
+                graphic_screen.style.imageRendering = "webkit-optimize-contrast";
+                graphic_screen.style.imageRendering = "o-crisp-edges";
+                graphic_screen.style.imageRendering = "pixelated";
+                graphic_screen.style["-ms-interpolation-mode"] = "nearest-neighbor";
+            }
+            else
+            {
+                graphic_screen.style.imageRendering = "";
+                graphic_screen.style["-ms-interpolation-mode"] = "";
+            }
+
+            // undo fractional css-to-device pixel ratios
+            var device_pixel_ratio = window.devicePixelRatio || 1;
+            if(device_pixel_ratio % 1 !== 0)
+            {
+                scale_x /= device_pixel_ratio;
+                scale_y /= device_pixel_ratio;
+            }
+        }
+
+        if(scale_x !== 1)
+        {
+            elem.style.width = rectangle.width * scale_x + "px";
+        }
+        if(scale_y !== 1)
+        {
+            elem.style.height = rectangle.height * scale_y + "px";
+        }
     }
 
     this.update_cursor_scanline = function(start, end)
@@ -373,18 +441,12 @@ function ScreenAdapter(screen_container, bus)
             color_element,
             fragment;
 
-        var
-            bg_color,
+        var bg_color,
             fg_color,
             text;
 
         row_element = text_screen.childNodes[row];
-        fragment = document.createDocumentFragment();
-
-        while(row_element.firstChild)
-        {
-            row_element.removeChild(row_element.firstChild);
-        }
+        fragment = document.createElement("div");
 
         for(var i = 0; i < text_mode_width; )
         {
@@ -399,9 +461,9 @@ function ScreenAdapter(screen_container, bus)
             text = "";
 
             // put characters of the same color in one element
-            while(i < text_mode_width
-                    && text_mode_data[offset + 1] === bg_color
-                    && text_mode_data[offset + 2] === fg_color)
+            while(i < text_mode_width &&
+                text_mode_data[offset + 1] === bg_color &&
+                text_mode_data[offset + 2] === fg_color)
             {
                 var ascii = text_mode_data[offset];
 
@@ -431,25 +493,50 @@ function ScreenAdapter(screen_container, bus)
             fragment.appendChild(color_element);
         }
 
-        row_element.appendChild(fragment);
+        row_element.parentNode.replaceChild(fragment, row_element);
     };
 
-    this.update_buffer = function(min, max)
+    this.update_buffer = function(layers)
     {
-        if(max < min)
+        if(DEBUG_SCREEN_LAYERS)
         {
+            // Draw the entire buffer. Useful for debugging
+            // panning / page flipping / screen splitting code for both
+            // v86 developers and os developers
+            graphic_context.putImageData(
+                graphic_image_data,
+                0, 0
+            );
+
+            // For each visible layer that would've been drawn, draw a
+            // rectangle to visualise the layer instead.
+            graphic_context.strokeStyle = "#0F0";
+            graphic_context.lineWidth = 4;
+            layers.forEach((layer) =>
+            {
+                graphic_context.strokeRect(
+                    layer.buffer_x,
+                    layer.buffer_y,
+                    layer.buffer_width,
+                    layer.buffer_height
+                );
+            });
+            graphic_context.lineWidth = 1;
             return;
         }
 
-        var min_y = min / graphical_mode_width | 0;
-        var max_y = max / graphical_mode_width | 0;
-
-        graphic_context.putImageData(
-            graphic_image_data,
-            0, 0,
-            0, min_y,
-            graphical_mode_width, max_y - min_y + 1
-        );
+        layers.forEach((layer) =>
+        {
+            graphic_context.putImageData(
+                graphic_image_data,
+                layer.screen_x - layer.buffer_x,
+                layer.screen_y - layer.buffer_y,
+                layer.buffer_x,
+                layer.buffer_y,
+                layer.buffer_width,
+                layer.buffer_height
+            );
+        });
     };
 
     this.init();

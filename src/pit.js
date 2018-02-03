@@ -11,10 +11,12 @@ var OSCILLATOR_FREQ = 1193.1816666; // 1.193182 MHz
  *
  * Programmable Interval Timer
  */
-function PIT(cpu)
+function PIT(cpu, bus)
 {
     /** @const @type {CPU} */
     this.cpu = cpu;
+
+    this.bus = bus;
 
     this.counter_start_time = new Float64Array(3);
     this.counter_start_value = new Uint16Array(3);
@@ -41,6 +43,10 @@ function PIT(cpu)
         var counter2_out = this.did_rollover(2, now);
 
         return ref_toggle << 4 | counter2_out << 5;
+    });
+    cpu.io.register_write(0x61, this, function(data)
+    {
+        this.bus.send("pcspeaker-enable", data & 1);
     });
 
     cpu.io.register_read(0x40, this, function() { return this.counter_read(0); });
@@ -89,9 +95,9 @@ PIT.prototype.timer = function(now, no_irq)
     var time_to_next_interrupt = 100;
 
     // counter 0 produces interrupts
-    if(!no_irq && this.counter_enabled[0])
+    if(!no_irq)
     {
-        if(this.did_rollover(0, now))
+        if(this.counter_enabled[0] && this.did_rollover(0, now))
         {
             time_to_next_interrupt = 0;
 
@@ -107,6 +113,10 @@ PIT.prototype.timer = function(now, no_irq)
             {
                 this.counter_enabled[0] = 0;
             }
+        }
+        else
+        {
+            this.cpu.device_lower_irq(0);
         }
     }
     time_to_next_interrupt = 0;
@@ -128,9 +138,15 @@ PIT.prototype.get_counter_value = function(i, now)
 
     dbg_log("diff=" + diff + " dticks=" + diff_in_ticks + " value=" + value + " reload=" + this.counter_reload[i], LOG_PIT);
 
-    if(value < 0)
+    var reload = this.counter_reload[i];
+
+    if(value >= reload)
     {
-        var reload = this.counter_reload[i];
+        dbg_log("Warning: Counter" + i + " value " + value  + " is larger than reload " + reload, LOG_PIT);
+        value %= reload;
+    }
+    else if(value < 0)
+    {
         value = value % reload + reload;
     }
 
@@ -226,6 +242,8 @@ PIT.prototype.counter_write = function(i, value)
     {
         this.counter_next_low[i] ^= 1;
     }
+
+    this.bus.send("pcspeaker-update", [this.counter_mode[2], this.counter_reload[2]]);
 };
 
 PIT.prototype.port43_write = function(reg_byte)
@@ -251,7 +269,7 @@ PIT.prototype.port43_write = function(reg_byte)
         // latch
         this.counter_latch[i] = 2;
         var value = this.get_counter_value(i, v86.microtick());
-        dbg_log("pit latch: " + value, LOG_PIT);
+        dbg_log("latch: " + value, LOG_PIT);
         this.counter_latch_value[i] = value ? value - 1 : 0
 
         return;
@@ -282,6 +300,10 @@ PIT.prototype.port43_write = function(reg_byte)
         this.counter_next_low[i] = 1;
     }
 
+    if(i === 0)
+    {
+        this.cpu.device_lower_irq(0);
+    }
 
     if(mode === 0)
     {
@@ -297,4 +319,6 @@ PIT.prototype.port43_write = function(reg_byte)
 
     this.counter_mode[i] = mode;
     this.counter_read_mode[i] = read_mode;
+
+    this.bus.send("pcspeaker-update", [this.counter_mode[2], this.counter_reload[2]]);
 };

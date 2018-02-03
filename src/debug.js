@@ -67,10 +67,11 @@ CPU.prototype.debug_init = function()
         }
     };
 
-    debug.dump_regs = dump_regs;
+    debug.get_regs_short = get_regs_short;
+    debug.dump_regs = dump_regs_short;
     debug.dump_instructions = dump_instructions;
     debug.get_instructions = get_instructions;
-    debug.dump_regs_short = dump_regs_short;
+    debug.get_state = get_state;
     debug.dump_state = dump_state;
     debug.dump_stack = dump_stack;
 
@@ -84,14 +85,6 @@ CPU.prototype.debug_init = function()
 
     debug.step = step;
     debug.run_until = run_until;
-
-    debug.debugger = function()
-    {
-        if(DEBUG)
-        {
-            debugger;
-        }
-    }
 
     /**
      * @param {string=} msg
@@ -113,7 +106,7 @@ CPU.prototype.debug_init = function()
             return s;
         }
         //this.name = "Unimplemented";
-    }
+    };
 
     function step()
     {
@@ -121,14 +114,7 @@ CPU.prototype.debug_init = function()
 
         if(!cpu.running)
         {
-            try
-            {
-                cpu.cycle();
-            }
-            catch(e)
-            {
-                cpu.exception_cleanup(e);
-            }
+            cpu.cycle();
         }
 
         dump_regs_short();
@@ -145,7 +131,6 @@ CPU.prototype.debug_init = function()
         cpu.running = false;
         var a = parseInt(prompt("input hex", ""), 16);
         if(a) while(cpu.instruction_pointer != a) step();
-        dump_regs();
     }
 
     // http://ref.x86asm.net/x86reference.xml
@@ -201,7 +186,7 @@ CPU.prototype.debug_init = function()
             debug.ops.add(_ip);
             debug.ops.add(op);
         }
-    }
+    };
 
     function dump_stack(start, end)
     {
@@ -224,31 +209,68 @@ CPU.prototype.debug_init = function()
 
             line += h(i, 2) + " | ";
 
-            dbg_log(line + h(esp + 4 * i, 8) + " | " + h(cpu.memory.read32s(esp + 4 * i) >>> 0));
+            dbg_log(line + h(esp + 4 * i, 8) + " | " + h(cpu.read32s(esp + 4 * i) >>> 0));
         }
     }
 
-    function dump_state()
+    function get_state(where)
     {
-        if(!DEBUG) return;
-
-        var mode = cpu.protected_mode ? "prot" : "real";
         var vm = (cpu.flags & flag_vm) ? 1 : 0;
+        var mode = cpu.protected_mode ? vm ? "vm86" : "prot" : "real";
+        var flags = cpu.get_eflags();
         var iopl = cpu.getiopl();
         var cpl = cpu.cpl;
         var cs_eip = h(cpu.sreg[reg_cs], 4) + ":" + h(cpu.get_real_eip() >>> 0, 8);
+        var ss_esp = h(cpu.sreg[reg_ss], 4) + ":" + h(cpu.get_stack_reg() >>> 0, 8);
         var op_size = cpu.is_32 ? "32" : "16";
         var if_ = (cpu.flags & flag_interrupt) ? 1 : 0;
 
-        dbg_log("mode=" + mode + "/" + op_size + " paging=" + (+cpu.paging) + " vm=" + vm +
+        var flag_names = {
+            [flag_carry]: "c",
+            [flag_parity]: "p",
+            [flag_adjust]: "a",
+            [flag_zero]: "z",
+            [flag_sign]: "s",
+            [flag_trap]: "t",
+            [flag_interrupt]: "i",
+            [flag_direction]: "d",
+            [flag_overflow]: "o",
+        };
+        var flag_string = "";
+
+        for(var i = 0; i < 16; i++)
+        {
+            if(flag_names[1 << i])
+            {
+                if(flags & 1 << i)
+                {
+                    flag_string += flag_names[1 << i];
+                }
+                else
+                {
+                    flag_string += " ";
+                }
+            }
+        }
+
+        return ("mode=" + mode + "/" + op_size + " paging=" + (+cpu.paging) +
                 " iopl=" + iopl + " cpl=" + cpl + " if=" + if_ + " cs:eip=" + cs_eip +
-                " cs_off=" + h(cpu.get_seg(reg_cs) >>> 0, 8) + " flgs=" + h(cpu.get_eflags() >>> 0), LOG_CPU);
+                " cs_off=" + h(cpu.get_seg(reg_cs) >>> 0, 8) +
+                " flgs=" + h(cpu.get_eflags() >>> 0, 6) + " (" + flag_string + ")" +
+                " ss:esp=" + ss_esp +
+                " ssize=" + (+cpu.stack_size_32) +
+                (where ? " in " + where : ""));
     }
 
-    function dump_regs_short()
+    function dump_state(where)
     {
         if(!DEBUG) return;
 
+        dbg_log(get_state(where), LOG_CPU);
+    }
+
+    function get_regs_short()
+    {
         var
             r32 = { "eax": reg_eax, "ecx": reg_ecx, "edx": reg_edx, "ebx": reg_ebx,
                     "esp": reg_esp, "ebp": reg_ebp, "esi": reg_esi, "edi": reg_edi },
@@ -265,67 +287,23 @@ CPU.prototype.debug_init = function()
             line2 += r32_names[i+4] + "="  + h(cpu.reg32[r32[r32_names[i+4]]], 8) + " ";
         }
 
-        line1 += " eip=" + h(cpu.get_real_eip() >>> 0, 8);
-        line2 += " flg=" + h(cpu.get_eflags(), 8);
+        //line1 += " eip=" + h(cpu.get_real_eip() >>> 0, 8);
+        //line2 += " flg=" + h(cpu.get_eflags(), 8);
 
-        line1 += "  ds=" + h(cpu.sreg[reg_ds], 4) + " es=" + h(cpu.sreg[reg_es], 4) + "  fs=" + h(cpu.sreg[reg_fs], 4);
-        line2 += "  gs=" + h(cpu.sreg[reg_gs], 4) + " cs=" + h(cpu.sreg[reg_cs], 4) + "  ss=" + h(cpu.sreg[reg_ss], 4);
+        line1 += "  ds=" + h(cpu.sreg[reg_ds], 4) + " es=" + h(cpu.sreg[reg_es], 4) + " fs=" + h(cpu.sreg[reg_fs], 4);
+        line2 += "  gs=" + h(cpu.sreg[reg_gs], 4) + " cs=" + h(cpu.sreg[reg_cs], 4) + " ss=" + h(cpu.sreg[reg_ss], 4);
 
-        dbg_log(line1, LOG_CPU);
-        dbg_log(line2, LOG_CPU);
+        return [line1, line2];
     }
 
-    function dump_regs()
+    function dump_regs_short()
     {
         if(!DEBUG) return;
 
-        var
-            r32 = { "eax": reg_eax, "ecx": reg_ecx, "edx": reg_edx, "ebx": reg_ebx,
-                    "esp": reg_esp, "ebp": reg_ebp, "esi": reg_esi, "edi": reg_edi },
+        var lines = get_regs_short();
 
-            s = { "cs": reg_cs, "ds": reg_ds, "es": reg_es,
-                  "fs": reg_fs, "gs": reg_gs, "ss": reg_ss },
-
-            out;
-
-
-        dbg_log("----- DUMP (ip = " + h(cpu.instruction_pointer >>> 0) + ") ----------")
-        dbg_log("protected mode: " + cpu.protected_mode);
-
-        for(var i in r32)
-        {
-            dbg_log(i + " =  " + h(cpu.reg32[r32[i]], 8));
-        }
-        dbg_log("eip =  " + h(cpu.get_real_eip() >>> 0, 8));
-
-        for(i in s)
-        {
-            dbg_log(i + "  =  " + h(cpu.sreg[s[i]], 4));
-        }
-
-        out = "";
-
-        var flg = { "cf": cpu.getcf, "pf": cpu.getpf, "zf": cpu.getzf,  "sf": cpu.getsf,
-                    "of": cpu.getof, "df": flag_direction, "if": flag_interrupt };
-
-        for(var i in flg)
-        {
-            if(+flg[i])
-            {
-                out += i + "=" + Number(!!(cpu.flags & flg[i])) + " | ";
-            }
-            else
-            {
-                out += i + "=" + Number(!!flg[i]()) + " | ";
-            }
-        }
-        out += "iopl=" + cpu.getiopl();
-        dbg_log(out);
-
-
-        //dbg_log("last operation: " + h(last_op1 | 0) + ", " +  h(last_op2 | 0) + " = " +
-                //h(last_result | 0) + " (" + last_op_size + " bit)")
-
+        dbg_log(lines[0], LOG_CPU);
+        dbg_log(lines[1], LOG_CPU);
     }
 
     function get_instructions()
@@ -389,13 +367,13 @@ CPU.prototype.debug_init = function()
         {
             for(var i = 0; i < size; i += 8, addr += 8)
             {
-                var base = cpu.memory.read16(addr + 2) |
-                        cpu.memory.read8(addr + 4) << 16 |
-                        cpu.memory.read8(addr + 7) << 24,
+                var base = cpu.read16(addr + 2) |
+                        cpu.read8(addr + 4) << 16 |
+                        cpu.read8(addr + 7) << 24,
 
-                    limit = cpu.memory.read16(addr) | (cpu.memory.read8(addr + 6) & 0xF) << 16,
-                    access = cpu.memory.read8(addr + 5),
-                    flags = cpu.memory.read8(addr + 6) >> 4,
+                    limit = cpu.read16(addr) | (cpu.read8(addr + 6) & 0xF) << 16,
+                    access = cpu.read8(addr + 5),
+                    flags = cpu.read8(addr + 6) >> 4,
                     flags_str = "",
                     dpl = access >> 5 & 3;
 
@@ -464,9 +442,9 @@ CPU.prototype.debug_init = function()
         for(var i = 0; i < cpu.idtr_size; i += 8)
         {
             var addr = cpu.translate_address_system_read(cpu.idtr_offset + i),
-                base = cpu.memory.read16(addr) | cpu.memory.read16(addr + 6) << 16,
-                selector = cpu.memory.read16(addr + 2),
-                type = cpu.memory.read8(addr + 5),
+                base = cpu.read16(addr) | cpu.read16(addr + 6) << 16,
+                selector = cpu.read16(addr + 2),
+                type = cpu.read8(addr + 5),
                 line,
                 dpl = type >> 5 & 3;
 
@@ -545,7 +523,8 @@ CPU.prototype.debug_init = function()
 
         for(var i = 0; i < 1024; i++)
         {
-            var dword = cpu.memory.read32s(cpu.cr[3] + 4 * i),
+            var addr = cpu.cr[3] + 4 * i;
+            var dword = cpu.read32s(addr),
                 entry = load_page_entry(dword, true);
 
             if(!entry)
@@ -573,7 +552,8 @@ CPU.prototype.debug_init = function()
 
             for(var j = 0; j < 1024; j++)
             {
-                dword = cpu.memory.read32s(entry.address + 4 * j);
+                var sub_addr = entry.address + 4 * j;
+                dword = cpu.read32s(sub_addr);
 
                 var subentry = load_page_entry(dword, false);
 
@@ -589,7 +569,7 @@ CPU.prototype.debug_init = function()
                     flags += subentry.dirty ? "Di " : "   ";
 
                     dbg_log("# " + h((i << 22 | j << 12) >>> 0, 8) + " -> " +
-                            h(subentry.address, 8) + " | " + flags);
+                            h(subentry.address, 8) + " | " + flags + "        (at " + h(sub_addr, 8) + ")");
                 }
             }
         }
@@ -611,7 +591,7 @@ CPU.prototype.debug_init = function()
             start = 0;
         }
 
-        return cpu.memory.mem8.slice(start, start + count).buffer;
+        return cpu.mem8.slice(start, start + count).buffer;
     }
 
 
@@ -628,7 +608,7 @@ CPU.prototype.debug_init = function()
 
             for(var j = 0; j < 0x10; j++)
             {
-                byt = cpu.memory.read8(addr + (i << 4) + j);
+                byt = cpu.read8(addr + (i << 4) + j);
                 line += h(byt, 2) + " ";
             }
 
@@ -636,7 +616,7 @@ CPU.prototype.debug_init = function()
 
             for(j = 0; j < 0x10; j++)
             {
-                byt = cpu.memory.read8(addr + (i << 4) + j);
+                byt = cpu.read8(addr + (i << 4) + j);
                 line += (byt < 33 || byt > 126) ? "." : String.fromCharCode(byt);
             }
 
@@ -659,23 +639,28 @@ CPU.prototype.debug_init = function()
 
             for(var j = 0; j < width; j++)
             {
-                var used = cpu.memory.mem32s[(i * width + j) * block_size] > 0;
+                var used = cpu.mem32s[(i * width + j) * block_size] > 0;
 
                 row += used ? "X" : " ";
             }
 
             dbg_log(row);
         }
-    };
+    }
 
 
     debug.debug_interrupt = function(interrupt_nr)
     {
         //if(interrupt_nr === 0x20)
         //{
-        //    var vxd_device = this.safe_read16(this.instruction_pointer + 2);
-        //    var vxd_sub = this.safe_read16(this.instruction_pointer + 0);
-        //    dbg_log("vxd: " + h(vxd_device, 4) + " " + h(vxd_sub, 4));
+        //    //var vxd_device = cpu.safe_read16(cpu.instruction_pointer + 2);
+        //    //var vxd_sub = cpu.safe_read16(cpu.instruction_pointer + 0);
+        //    //var service = "";
+        //    //if(vxd_device === 1)
+        //    //{
+        //    //    service = vxd_table1[vxd_sub];
+        //    //}
+        //    //dbg_log("vxd: " + h(vxd_device, 4) + " " + h(vxd_sub, 4) + " " + service);
         //}
 
         //if(interrupt_nr >= 0x21 && interrupt_nr < 0x30)
@@ -705,7 +690,7 @@ CPU.prototype.debug_init = function()
         //    this.instruction_pointer += 2;
         //    dbg_log("BUG()", LOG_CPU);
         //    dbg_log("line=" + this.read_imm16() + " " +
-        //            "file=" + this.memory.read_string(this.translate_address_read(this.read_imm32s())), LOG_CPU);
+        //            "file=" + this.read_string(this.translate_address_read(this.read_imm32s())), LOG_CPU);
         //    this.instruction_pointer -= 8;
         //    this.debug.dump_regs_short();
         //}
@@ -722,4 +707,4 @@ CPU.prototype.debug_init = function()
         //    this.debug.dump_regs_short();
         //}
     };
-}
+};

@@ -284,7 +284,7 @@ function KeyboardAdapter(bus)
 
     function may_handle(e)
     {
-        if(e.shiftKey && e.ctrlKey && e.keyCode === 74)
+        if(e.shiftKey && e.ctrlKey && (e.keyCode === 74 || e.keyCode === 75))
         {
               // don't prevent opening chromium dev tools
               // maybe add other important combinations here, too
@@ -325,11 +325,23 @@ function KeyboardAdapter(bus)
 
     function keyup_handler(e)
     {
+        if(!e.altKey && keys_pressed[0x38])
+        {
+            // trigger ALT keyup manually - some browsers don't
+            // see issue #165
+            handle_code(0x38, false);
+        }
         return handler(e, false);
     }
 
     function keydown_handler(e)
     {
+        if(!e.altKey && keys_pressed[0x38])
+        {
+            // trigger ALT keyup manually - some browsers don't
+            // see issue #165
+            handle_code(0x38, false);
+        }
         return handler(e, true);
     }
 

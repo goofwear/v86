@@ -1,5 +1,8 @@
 "use strict";
 
+/** @const */
+var ASYNC_SAFE = false;
+
 (function()
 {
     if(typeof XMLHttpRequest === "undefined")
@@ -37,9 +40,15 @@
             for(var i = 0; i < header_names.length; i++)
             {
                 var name = header_names[i];
-
                 http.setRequestHeader(name, options.headers[name]);
             }
+        }
+
+        if(options.range)
+        {
+            let start = options.range.start;
+            let end = start + options.range.length - 1;
+            http.setRequestHeader("Range", "bytes=" + start + "-" + end);
         }
 
         http.onload = function(e)
@@ -48,7 +57,7 @@
             {
                 if(http.status !== 200 && http.status !== 206)
                 {
-                    console.log("Loading the image `" + filename + "` failed");
+                    console.error("Loading the image `" + filename + "` failed (status %d)", http.status);
                 }
                 else if(http.response)
                 {
@@ -70,28 +79,107 @@
 
     function load_file_nodejs(filename, options)
     {
-        var o = {
-            encoding: options.as_text ? "utf-8" : null,
-        };
+        let fs = require("fs");
 
-        require("fs")["readFile"](filename, o, function(err, data)
+        if(options.range)
         {
-            if(err)
-            {
-                console.log("Could not read file:", filename);
-            }
-            else
-            {
-                var result = data;
+            dbg_assert(!options.as_text);
 
-                if(!options.as_text)
+            fs["open"](filename, "r", (err, fd) =>
+            {
+                if(err) throw err;
+
+                let length = options.range.length;
+                var buffer = new global["Buffer"](length);
+
+                fs["read"](fd, buffer, 0, length, options.range.start, (err, bytes_read) =>
                 {
-                    result = new Uint8Array(result).buffer;
-                }
+                    if(err) throw err;
 
-                options.done(result);
-            }
-        });
+                    dbg_assert(bytes_read === length);
+                    options.done && options.done(new Uint8Array(buffer));
+
+                    fs["close"](fd, (err) => {
+                        if(err) throw err;
+                    });
+                });
+            });
+        }
+        else
+        {
+            var o = {
+                encoding: options.as_text ? "utf-8" : null,
+            };
+
+            fs["readFile"](filename, o, function(err, data)
+            {
+                if(err)
+                {
+                    console.log("Could not read file:", filename, err);
+                }
+                else
+                {
+                    var result = data;
+
+                    if(!options.as_text)
+                    {
+                        result = new Uint8Array(result).buffer;
+                    }
+
+                    options.done(result);
+                }
+            });
+        }
+    }
+
+    if(typeof XMLHttpRequest === "undefined")
+    {
+        var determine_size = function(path, cb)
+        {
+            require("fs")["stat"](path, (err, stats) =>
+            {
+                if(err)
+                {
+                    cb(err);
+                }
+                else
+                {
+                    cb(null, stats.size);
+                }
+            });
+        };
+    }
+    else
+    {
+        var determine_size = function(url, cb)
+        {
+            v86util.load_file(url, {
+                done: (buffer, http) =>
+                {
+                    var header = http.getResponseHeader("Content-Range") || "";
+                    var match = header.match(/\/(\d+)\s*$/);
+
+                    if(match)
+                    {
+                        cb(null, +match[1]);
+                    }
+                    else
+                    {
+                        cb({ header });
+                    }
+                },
+                headers: {
+                    Range: "bytes=0-0",
+
+                    //"Accept-Encoding": "",
+
+                    // Added by Chromium, but can cause the whole file to be sent
+                    // Settings this to empty also causes problems and Chromium
+                    // doesn't seem to create this header any more
+                    //"If-Range": "",
+                }
+            });
+        };
     }
 
     /**
@@ -126,34 +214,57 @@
 
         // Determine the size using a request
 
-        load_file(this.filename, {
-            done: function done(buffer, http)
+        determine_size(this.filename, (error, size) =>
+        {
+            if(error)
             {
-                var header = http.getResponseHeader("Content-Range") || "";
-                var match = header.match(/\/(\d+)\s*$/);
-
-                if(match)
-                {
-                    this.byteLength = +match[1]
-                    this.onload && this.onload({});
-                }
-                else
-                {
-                    console.assert(false,
-                        "Cannot use: " + this.filename + ". " +
-                        "`Range: bytes=...` header not supported (Got `" + header + "`)");
-                }
-            }.bind(this),
-            headers: {
-                Range: "bytes=0-0",
-
-                // Added by Chromium, but can cause the whole file to be sent
-                // Settings this to empty also causes problems and Chromium
-                // doesn't seem to create this header any more
-                //"If-Range": "",
+                console.assert(false,
+                    "Cannot use: " + this.filename + ". " +
+                    "`Range: bytes=...` header not supported (Got `" + error.header + "`)");
+            }
+            else
+            {
+                dbg_assert(size >= 0);
+                this.byteLength = size;
+                this.onload && this.onload({});
             }
         });
-    }
+    };
+
+    /**
+     * @param {number} offset
+     * @param {number} len
+     * @param {function(!Uint8Array)} fn
+     */
+    AsyncXHRBuffer.prototype.get_from_cache = function(offset, len, fn)
+    {
+        var number_of_blocks = len / this.block_size;
+        var block_index = offset / this.block_size;
+
+        for(var i = 0; i < number_of_blocks; i++)
+        {
+            var block = this.loaded_blocks[block_index + i];
+
+            if(!block)
+            {
+                return;
+            }
+        }
+
+        if(number_of_blocks === 1)
+        {
+            return this.loaded_blocks[block_index];
+        }
+        else
+        {
+            var result = new Uint8Array(len);
+            for(var i = 0; i < number_of_blocks; i++)
+            {
+                result.set(this.loaded_blocks[block_index + i], i * this.block_size);
+            }
+            return result;
+        }
+    };
 
     /**
      * @param {number} offset
@@ -162,25 +273,35 @@
      */
     AsyncXHRBuffer.prototype.get = function(offset, len, fn)
     {
+        console.assert(offset + len <= this.byteLength);
         console.assert(offset % this.block_size === 0);
         console.assert(len % this.block_size === 0);
         console.assert(len);
 
-        var range_start = offset;
-        var range_end = offset + len - 1;
+        var block = this.get_from_cache(offset, len, fn);
+        if(block)
+        {
+            if(ASYNC_SAFE)
+            {
+                setTimeout(fn.bind(this, block), 0);
+            }
+            else
+            {
+                fn(block);
+            }
+            return;
+        }
 
-        load_file(this.filename, {
+        v86util.load_file(this.filename, {
             done: function done(buffer)
             {
                 var block = new Uint8Array(buffer);
                 this.handle_read(offset, len, block);
                 fn(block);
             }.bind(this),
-            headers: {
-                Range: "bytes=" + range_start + "-" + range_end,
-            }
+            range: { start: offset, length: len },
         });
-    }
+    };
 
     /**
      * Relies on this.byteLength, this.loaded_blocks and this.block_size
@@ -220,7 +341,7 @@
         }
 
         fn();
-    }
+    };
 
     /**
      * @this {AsyncFileBuffer|AsyncXHRBuffer}
@@ -258,6 +379,38 @@
         fn();
     };
 
+    AsyncXHRBuffer.prototype.get_written_blocks = function()
+    {
+        var count = 0;
+        for(var _ in this.loaded_blocks)
+        {
+            count++;
+        }
+
+        var buffer = new Uint8Array(count * this.block_size);
+        var indices = [];
+
+        var i = 0;
+        for(var index in this.loaded_blocks)
+        {
+            var block = this.loaded_blocks[index];
+            dbg_assert(block.length === this.block_size);
+            index = +index;
+            indices.push(index);
+            buffer.set(
+                block,
+                i * this.block_size
+            );
+            i++;
+        }
+
+        return {
+            buffer,
+            indices,
+            block_size: this.block_size,
+        };
+    };
+
     /**
      * Synchronous access to File, loading blocks from the input type=file
      * The whole file is loaded into memory during initialisation
@@ -282,7 +435,7 @@
     SyncFileBuffer.prototype.load = function()
     {
         this.load_next(0);
-    }
+    };
 
     /**
      * @param {number} start
@@ -321,7 +474,7 @@
             this.file = undefined;
             this.onload && this.onload({ buffer: this.buffer });
         }
-    }
+    };
 
     /**
      * @param {number} start
@@ -363,7 +516,7 @@
         this.byteLength = file.size;
 
         /** @const */
-        this.block_size = 256
+        this.block_size = 256;
         this.loaded_blocks = {};
 
         this.onload = undefined;
@@ -386,6 +539,13 @@
         console.assert(len % this.block_size === 0);
         console.assert(len);
 
+        var block = this.get_from_cache(offset, len, fn);
+        if(block)
+        {
+            fn(block);
+            return;
+        }
+
         var fr = new FileReader();
 
         fr.onload = function(e)
@@ -398,7 +558,8 @@
         }.bind(this);
 
         fr.readAsArrayBuffer(this.file.slice(offset, offset + len));
-    }
+    };
+    AsyncFileBuffer.prototype.get_from_cache = AsyncXHRBuffer.prototype.get_from_cache;
     AsyncFileBuffer.prototype.set = AsyncXHRBuffer.prototype.set;
     AsyncFileBuffer.prototype.handle_read = AsyncXHRBuffer.prototype.handle_read;
 
@@ -406,6 +567,43 @@
     {
         // We must load all parts, unlikely a good idea for big files
         fn();
+    };
+
+    AsyncFileBuffer.prototype.get_as_file = function(name)
+    {
+        var parts = [];
+        var existing_blocks = Object.keys(this.loaded_blocks)
+                                .map(Number)
+                                .sort(function(x, y) { return x - y; });
+
+        var current_offset = 0;
+
+        for(var i = 0; i < existing_blocks.length; i++)
+        {
+            var block_index = existing_blocks[i];
+            var block = this.loaded_blocks[block_index];
+            var start = block_index * this.block_size;
+            console.assert(start >= current_offset);
+
+            if(start !== current_offset)
+            {
+                parts.push(this.file.slice(current_offset, start));
+                current_offset = start;
+            }
+
+            parts.push(block);
+            current_offset += block.length;
+        }
+
+        if(current_offset !== this.file.size)
+        {
+            parts.push(this.file.slice(current_offset));
+        }
+
+        var file = new File(parts, name);
+        console.assert(file.size === this.file.size);
+
+        return file;
     };
 
 })();

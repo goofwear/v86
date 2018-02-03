@@ -15,7 +15,7 @@ function VirtIO(cpu, bus, filesystem)
         0xf4, 0x1a, 0x09, 0x10, 0x07, 0x05, 0x10, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x01, 0xa8, 0x00, 0x00, 0x00, 0x10, 0xbf, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf4, 0x1a, 0x09, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0c, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00,
     ];
     this.pci_id = 0x06 << 3;
     this.pci_bars = [
@@ -25,16 +25,20 @@ function VirtIO(cpu, bus, filesystem)
     ];
     this.name = "virtio";
 
-    cpu.devices.pci.register_device(this);
-
     var io = cpu.io;
 
-    io.register_read(0xA800, this, undefined, undefined, function()
-    {
-        // device features
-        dbg_log("Read device features", LOG_VIRTIO);
-        return 1;
-    });
+    io.register_read(0xA800, this,
+        function() {
+            dbg_log("Read device features", LOG_VIRTIO);
+            return 1;
+        },
+        undefined,
+        function()
+        {
+            dbg_log("Read device features", LOG_VIRTIO);
+            return 1;
+        }
+    );
 
     io.register_write(0xA804, this, undefined, undefined, function(data)
     {
@@ -117,6 +121,7 @@ function VirtIO(cpu, bus, filesystem)
         // reading resets the isr
         var isr = this.isr;
         this.isr = 0;
+        this.pci.lower_irq(this.pci_id);
         return isr;
     });
 
@@ -131,9 +136,9 @@ function VirtIO(cpu, bus, filesystem)
         var ring_start = queue_start + 16 * this.queue_size;
         var ring_desc_start = ring_start + 4;
 
-        var //flags = this.memory.read16(ring_start),
+        var //flags = this.cpu.read16(ring_start),
             // index of the next free ring
-            idx = this.memory.read16(ring_start + 2);
+            idx = this.cpu.read16(ring_start + 2);
 
         dbg_log("idx=" + h(idx, 4), LOG_VIRTIO);
         //dbg_assert(idx < this.queue_size);
@@ -143,17 +148,18 @@ function VirtIO(cpu, bus, filesystem)
 
         while(this.last_idx !== idx)
         {
-            var desc_idx = this.memory.read16(ring_desc_start + this.last_idx * 2);
+            var desc_idx = this.cpu.read16(ring_desc_start + this.last_idx * 2);
             this.handle_descriptor(desc_idx);
 
             this.last_idx = this.last_idx + 1 & mask;
         }
     });
 
-    this.irq = 0xC;
-
     /** @const @type {CPU} */
     this.cpu = cpu;
+
+    /** @const @type {PCI} */
+    this.pci = cpu.devices.pci;
 
     /** @const @type {BusConnector} */
     this.bus = bus;
@@ -166,9 +172,6 @@ function VirtIO(cpu, bus, filesystem)
     this.last_idx = 0;
     this.queue_size = 32;
     this.queue_address = 0;
-
-    /** @const @type {Memory} */
-    this.memory = cpu.memory;
 
     for(var i = 0; i < 128; i++)
     {
@@ -195,13 +198,15 @@ function VirtIO(cpu, bus, filesystem)
     // should be generalized to support more devices than just the filesystem
     this.device = new Virtio9p(filesystem, bus);
     this.device.SendReply = this.device_reply.bind(this);
+
+    cpu.devices.pci.register_device(this);
 }
 
 VirtIO.prototype.get_state = function()
 {
     var state = [];
 
-    state[0] = this.irq;
+    state[0] = 0; // unused
     state[1] = this.queue_select;
     state[2] = this.device_status;
     state[3] = this.isr;
@@ -215,7 +220,6 @@ VirtIO.prototype.get_state = function()
 
 VirtIO.prototype.set_state = function(state)
 {
-    this.irq = state[0];
     this.queue_select = state[1];
     this.device_status = state[2];
     this.isr = state[3];
@@ -249,7 +253,7 @@ VirtIO.prototype.handle_descriptor = function(idx)
     do
     {
         var addr = desc_start + next * 16;
-        var flags = this.memory.read16(addr + 12);
+        var flags = this.cpu.read16(addr + 12);
 
         if(flags & VRING_DESC_F_WRITE)
         {
@@ -260,9 +264,9 @@ VirtIO.prototype.handle_descriptor = function(idx)
             dbg_assert(false, "unsupported");
         }
 
-        var addr_low = this.memory.read32s(addr);
-        var addr_high = this.memory.read32s(addr + 4);
-        var len = this.memory.read32s(addr + 8) >>> 0;
+        var addr_low = this.cpu.read32s(addr);
+        var addr_high = this.cpu.read32s(addr + 4);
+        var len = this.cpu.read32s(addr + 8) >>> 0;
 
         buffers.push({
             addr_low: addr_low,
@@ -275,7 +279,7 @@ VirtIO.prototype.handle_descriptor = function(idx)
 
         if(flags & VRING_DESC_F_NEXT)
         {
-            next = this.memory.read16(addr + 14);
+            next = this.cpu.read16(addr + 14);
             dbg_assert(next < this.queue_size);
         }
         else
@@ -313,7 +317,7 @@ VirtIO.prototype.handle_descriptor = function(idx)
             pointer = 0;
         }
 
-        return this.memory.read8(addr_low + pointer++);
+        return this.cpu.read8(addr_low + pointer++);
     }.bind(this));
 };
 
@@ -337,7 +341,7 @@ VirtIO.prototype.device_reply = function(queueidx, infos)
     do
     {
         var addr = desc_start + next * 16;
-        var flags = this.memory.read16(addr + 12);
+        var flags = this.cpu.read16(addr + 12);
 
         if((flags & VRING_DESC_F_WRITE) === 0)
         {
@@ -345,9 +349,9 @@ VirtIO.prototype.device_reply = function(queueidx, infos)
             break;
         }
 
-        var addr_low = this.memory.read32s(addr);
-        var addr_high = this.memory.read32s(addr + 4);
-        var len = this.memory.read32s(addr + 8) >>> 0;
+        var addr_low = this.cpu.read32s(addr);
+        var addr_high = this.cpu.read32s(addr + 4);
+        var len = this.cpu.read32s(addr + 8) >>> 0;
 
         buffers.push({
             addr_low: addr_low,
@@ -360,7 +364,7 @@ VirtIO.prototype.device_reply = function(queueidx, infos)
 
         if(flags & VRING_DESC_F_NEXT)
         {
-            next = this.memory.read16(addr + 14);
+            next = this.cpu.read16(addr + 14);
             dbg_assert(next < this.queue_size);
         }
         else
@@ -392,25 +396,23 @@ VirtIO.prototype.device_reply = function(queueidx, infos)
             pointer = 0;
         }
 
-        this.memory.write8(addr_low + pointer++, data);
+        this.cpu.write8(addr_low + pointer++, data);
     }
 
     var used_desc_start = (this.queue_address << 12) + 16 * this.queue_size + 4 + 2 * this.queue_size;
     used_desc_start = used_desc_start + 4095 & ~4095;
 
-    var flags = this.memory.read16(used_desc_start);
-    var used_idx = this.memory.read16(used_desc_start + 2);
-    this.memory.write16(used_desc_start + 2, used_idx + 1);
+    var flags = this.cpu.read16(used_desc_start);
+    var used_idx = this.cpu.read16(used_desc_start + 2);
+    this.cpu.write16(used_desc_start + 2, used_idx + 1);
 
     dbg_log("used descriptor: addr=" + h(used_desc_start, 8) + " flags=" + h(flags, 4) + " idx=" + h(used_idx, 4), LOG_VIRTIO);
 
     used_idx &= mask;
     var used_desc_offset = used_desc_start + 4 + used_idx * 8;
-    this.memory.write32(used_desc_offset, infos.start);
-    this.memory.write32(used_desc_offset + 4, result_length);
+    this.cpu.write32(used_desc_offset, infos.start);
+    this.cpu.write32(used_desc_offset + 4, result_length);
 
     this.isr |= 1;
-    this.cpu.device_raise_irq(this.irq);
+    this.pci.raise_irq(this.pci_id);
 };
-
-
